@@ -2,6 +2,8 @@ name: Spike
 description: A time-boxed research or investigation task to reduce uncertainty.
 title: "[Spike]: "
 labels: ["spike"]
+assignees: ["dlnanh85"]
+projects: ["dlnanh85/1"]
 body:
   - type: textarea
     id: question
@@ -16,18 +18,6 @@ body:
       label: Background
       description: Why is this uncertain? What prompted the spike?
   - type: textarea
-    id: approach
-    attributes:
-      label: Approach
-      description: Options to evaluate, experiments or prototypes to build.
-  - type: input
-    id: timebox
-    attributes:
-      label: Time-box
-      placeholder: e.g. 2 days
-    validations:
-      required: true
-  - type: textarea
     id: deliverables
     attributes:
       label: Expected output
@@ -37,8 +27,3 @@ body:
         - [ ] Follow-up issues created
     validations:
       required: true
-  - type: input
-    id: related
-    attributes:
-      label: Related epic / issues
-      placeholder: "#123"
