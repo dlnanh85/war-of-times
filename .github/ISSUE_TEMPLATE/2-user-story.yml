@@ -2,6 +2,8 @@ name: User Story
 description: A small, user-focused piece of functionality that delivers value.
 title: "[Story]: "
 labels: ["user story"]
+assignees: ["dlnanh85"]
+projects: ["dlnanh85/1"]
 body:
   - type: textarea
     id: story
@@ -23,23 +25,6 @@ body:
         - [ ] Given <context>, when <action>, then <outcome>
     validations:
       required: true
-  - type: input
-    id: epic
-    attributes:
-      label: Parent epic
-      placeholder: "#123"
-  - type: dropdown
-    id: estimate
-    attributes:
-      label: Estimate (story points)
-      options:
-        - "1"
-        - "2"
-        - "3"
-        - "5"
-        - "8"
-        - "13"
-        - "Not estimated"
   - type: textarea
     id: notes
     attributes:

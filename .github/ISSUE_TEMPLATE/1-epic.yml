@@ -2,6 +2,8 @@ name: Epic
 description: A large body of work that groups related user stories and features.
 title: "[Epic]: "
 labels: ["epic"]
+assignees: ["dlnanh85"]
+projects: ["dlnanh85/1"]
 body:
   - type: textarea
     id: summary
@@ -28,26 +30,3 @@ body:
 
         **Out of scope**
         -
-  - type: textarea
-    id: children
-    attributes:
-      label: Child issues
-      description: Link the user stories, features, and spikes that belong to this epic.
-      placeholder: |
-        - [ ] #
-        - [ ] #
-  - type: textarea
-    id: success
-    attributes:
-      label: Success criteria
-      description: How will we know this epic is done?
-    validations:
-      required: true
-  - type: textarea
-    id: dependencies
-    attributes:
-      label: Dependencies & risks
-  - type: input
-    id: target
-    attributes:
-      label: Target milestone / release
