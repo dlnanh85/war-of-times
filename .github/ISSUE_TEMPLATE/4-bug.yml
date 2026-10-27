@@ -11,16 +11,16 @@ body:
       label: Description
       description: A clear and concise description of the bug.
       value: |
-        Description:
+        ### Description:
 
 
-        Steps to reproduce:
+        ### Steps to reproduce:
 
 
-        Expected result:
+        ### Expected result:
 
 
-        Actual result:
+        ### Actual result:
 
     validations:
       required: true
