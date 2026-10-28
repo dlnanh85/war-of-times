@@ -1,44 +1,272 @@
+# Claude reviewer.
+#
+# Runs on every non-draft PR from this repo (forks are skipped: they don't get secrets).
+# Claude reviews the PR and leaves inline comments, then returns a machine-readable
+# verdict. The "Apply verdict" step turns that verdict into:
+#   - one summary comment on the PR,
+#   - a `review:approved` or `review:changes-requested` label,
+#   - a commit status named "Claude verdict" (success / failure).
+# Claude itself can't approve PRs, so "Claude verdict" is what branch protection checks.
+#
+# See .agents/docs/agent-workflow-impl-plan.md, phase P1.
+
 name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# One review at a time per PR. Queue, don't cancel: a fixer job in this run may still be finishing.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+  review:
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      pull-requests: write
+      issues: write
+      statuses: write
       id-token: write
+      actions: read
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+      round: ${{ steps.verdict.outputs.round }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - name: Checkout repository
+      - name: Set pending status
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context="Claude verdict" \
+            -f description="Claude is reviewing this PR" \
+            -f target_url="$RUN_URL" > /dev/null
+
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0 # full history, so Claude can diff against the base branch
 
-      - name: Run Claude Code Review
-        id: claude-review
+      - name: Run Claude review
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          # Agent PRs and pushes come from claude[bot]; let those be reviewed too. No other bots.
+          allowed_bots: claude
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --model opus
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*),mcp__github_inline_comment__create_inline_comment"
+            --json-schema '{"type":"object","required":["verdict","summary","blocking","non_blocking"],"properties":{"verdict":{"enum":["approve","changes_requested"]},"summary":{"type":"string"},"blocking":{"type":"array","items":{"type":"string"}},"non_blocking":{"type":"array","items":{"type":"string"}},"previous_comments_addressed":{"type":"boolean"},"thread_decisions":{"type":"array","items":{"type":"object","required":["comment_id","decision"],"properties":{"comment_id":{"type":"integer"},"decision":{"enum":["accept","hold"]}}}}}}'
+          prompt: |
+            You are the code reviewer for the GitHub repository ${{ github.repository }}.
 
+            ## The PR
+            - PR number: ${{ github.event.pull_request.number }}
+            - Author: ${{ github.event.pull_request.user.login }}
+            - Head branch: ${{ github.head_ref }}
+            - Agent PR: ${{ startsWith(github.head_ref, 'agent/') }} (an agent PR is one whose branch starts with `agent/`; it was written by the AI agent, not by the tech lead)
+
+            ## Read first
+            1. The PR: `gh pr view ${{ github.event.pull_request.number }} --json title,body,closingIssuesReferences,files` and the diff: `gh pr diff ${{ github.event.pull_request.number }}`.
+            2. The linked issue (the `Closes #n` in the PR body, or `closingIssuesReferences`): `gh issue view <n>`. Note its acceptance criteria and, for agent PRs, its "Files in scope" and "Out of scope" sections.
+            3. `CLAUDE.md` at the repo root, if it exists. Its rules apply to this PR.
+            4. Your earlier review on this PR, if any:
+               - inline comments: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`. Your comments are the ones by `claude[bot]`. Replies to a comment have `in_reply_to_id` set to that comment's id; read every reply.
+               - earlier summary comments (they contain `<!-- claude-review:verdict=`): `gh pr view ${{ github.event.pull_request.number }} --comments`.
+            Read the changed files in full when the diff alone isn't enough to judge them.
+
+            ## What to review against
+            1. The linked issue's acceptance criteria. Is each one met?
+            2. The rules in CLAUDE.md.
+            3. Correctness: bugs, type errors, missing imports, broken commands, wrong logic.
+            4. Agent PRs only, the guardrails:
+               - about 200 changed lines of code or fewer;
+               - only touches files listed in the issue's "Files in scope";
+               - no backend/netcode changes (`apps/server/**`, `packages/shared/**`) and no CI changes (`.github/**`) unless the issue scopes them.
+
+            ## Blocking vs non-blocking
+            - Only problems from the four points above are blocking. Use `changes_requested` only if there is at least one blocking problem.
+            - Style, naming, small refactors and nice-to-haves are non-blocking. Put them in `non_blocking`. They must NOT cause `changes_requested`. This prevents endless nitpick loops.
+            - If there are no blocking problems, the verdict is `approve`, even if you have non-blocking notes.
+
+            ## Re-reviews
+            If you reviewed this PR before:
+            - Check each of your earlier inline comments against the new code and the replies in its thread.
+            - Set `previous_comments_addressed` to true if all your earlier blocking comments are fixed or settled, otherwise false.
+            - Don't repeat a comment that is already fixed. Don't post a new inline comment for a problem that already has an open thread from you; reply in that thread instead if needed.
+
+            ## When the author pushes back
+            If the author (agent or tech lead) replied to one of your comments disagreeing with it, judge the reply on its evidence. Be open to being wrong: a reply that cites the issue's acceptance criteria, a CLAUDE.md rule, a passing test or documentation should usually win. Then reply in that thread with
+            `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments/<comment_id>/replies -f body="..."`
+            (where `<comment_id>` is the id of your original comment), and decide:
+            - accept: reply "Agreed — <why>". Do not list it in `blocking`. Add `{"comment_id": <comment_id>, "decision": "accept"}` to `thread_decisions`. The workflow will resolve the thread for you.
+            - hold: reply with why the problem still stands, giving new evidence or a clearer explanation (not a repeat of your first comment). Keep it in `blocking`. Add `{"comment_id": <comment_id>, "decision": "hold"}` to `thread_decisions`.
+
+            ## Inline comments
+            - Post one inline comment per NEW blocking problem with `mcp__github_inline_comment__create_inline_comment`, on the exact line, with `confirmed: true`.
+            - When the fix is small, include a GitHub suggestion block (```suggestion ... ```) with the corrected lines.
+            - You may also post inline comments for non-blocking notes; start those with "Non-blocking:".
+
+            ## Backend explanations (only on comments)
+            The tech lead is a frontend developer who is new to backend code.
+            - Do NOT explain backend code you have no comment about. No comment means no explanation.
+            - When you DO raise a comment (blocking or non-blocking, inline or in the lists) about code in `apps/server/**` or `packages/shared/**`, explain in that comment, in plain language: the backend concept involved (for example "room", "state sync", "tick"; define any jargon), what could go wrong (with a concrete example if possible), and what the better approach is.
+
+            ## Hard rules
+            - Never write the text "@claude" anywhere (comments, replies, output). It would trigger another workflow.
+            - Never approve, request changes via the GitHub review API, or merge the PR.
+            - Don't post a summary comment yourself. The workflow posts it from your final structured output.
+
+            ## Your final output
+            Return the structured result:
+            - `verdict`: "approve" or "changes_requested".
+            - `summary`: 1–3 plain-English sentences on the overall state of the PR. The first 140 characters are shown as the commit status, so put the most important point first.
+            - `blocking`: one short string per blocking problem (file and line if relevant). Empty if none.
+            - `non_blocking`: one short string per non-blocking note. Empty if none.
+            - `previous_comments_addressed`: only on a re-review.
+            - `thread_decisions`: only for threads where the author pushed back.
+
+      - name: Apply verdict
+        id: verdict
+        if: always()
+        env:
+          REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+
+          set_status() { # $1 = state, $2 = description
+            gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" \
+              -f state="$1" \
+              -f context="Claude verdict" \
+              -f description="$2" \
+              -f target_url="$RUN_URL" > /dev/null
+          }
+
+          # 1. Check that Claude returned a valid result. If not, mark the review as errored and stop.
+          if ! printf '%s' "$REVIEW_JSON" | jq -e '
+              (.verdict == "approve" or .verdict == "changes_requested")
+              and (.summary | type == "string")
+              and (.blocking | type == "array")
+              and (.non_blocking | type == "array")' > /dev/null 2>&1; then
+            echo "::error::Claude did not return a valid review result (structured_output is missing or invalid)."
+            set_status error "Review failed — see run log"
+            exit 1
+          fi
+          verdict="$(jq -r '.verdict' <<< "$REVIEW_JSON")"
+
+          # 2. Count earlier "changes requested" rounds from our own summary comments (posted by github-actions[bot]).
+          #    --paginate runs the --jq filter once per page, so add the per-page counts together.
+          earlier="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]")
+                       | select(.body | contains("<!-- claude-review:verdict=changes_requested"))] | length' \
+            | awk '{ total += $1 } END { print total + 0 }')"
+          if [ "$verdict" = "changes_requested" ]; then
+            round=$((earlier + 1))
+          else
+            round="$earlier"
+          fi
+          echo "Verdict: $verdict, round: $round"
+          {
+            echo "verdict=$verdict"
+            echo "round=$round"
+          } >> "$GITHUB_OUTPUT"
+
+          # 3. Post one summary comment, ending with a hidden marker the next run uses to count rounds.
+          comment_file="$RUNNER_TEMP/claude-review-comment.md"
+          jq -r --arg round "$round" --arg run_url "$RUN_URL" '
+            def bullets: if length == 0 then "_None._" else map("- " + .) | join("\n") end;
+            (if .verdict == "approve"
+              then "## ✅ Claude review: approved"
+              else "## ❌ Claude review: changes requested (round \($round))" end),
+            "",
+            .summary,
+            "",
+            "### Blocking",
+            (.blocking | bullets),
+            "",
+            "### Non-blocking (suggestions only, these do not block merging)",
+            (.non_blocking | bullets),
+            (if has("previous_comments_addressed")
+              then "", "Earlier review comments addressed: \(if .previous_comments_addressed then "yes" else "no" end)"
+              else empty end),
+            "",
+            "<sub>[Review run](\($run_url))</sub>",
+            "",
+            "<!-- claude-review:verdict=\(.verdict) round=\($round) -->"
+          ' <<< "$REVIEW_JSON" > "$comment_file"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+          # 4. Resolve the review threads where Claude accepted the author's push-back. Best effort only.
+          accepted_ids="$(jq -r '(.thread_decisions // [])[] | select(.decision == "accept") | .comment_id' <<< "$REVIEW_JSON")"
+          if [ -n "$accepted_ids" ]; then
+            # shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell variables
+            threads_query='query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100) {
+                    nodes { id isResolved comments(first: 100) { nodes { databaseId } } }
+                  }
+                }
+              }
+            }'
+            # shellcheck disable=SC2016
+            resolve_mutation='mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }'
+            if threads="$(gh api graphql -f query="$threads_query" \
+                  -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER")"; then
+              for comment_id in $accepted_ids; do
+                thread_id="$(jq -r --argjson id "$comment_id" '
+                  [.data.repository.pullRequest.reviewThreads.nodes[]
+                    | select(.isResolved | not)
+                    | select(any(.comments.nodes[]; .databaseId == $id))
+                    | .id] | first // empty' <<< "$threads")"
+                if [ -z "$thread_id" ]; then
+                  echo "::warning::No open review thread found for comment $comment_id; nothing to resolve."
+                elif gh api graphql -f query="$resolve_mutation" -f id="$thread_id" > /dev/null; then
+                  echo "Resolved the review thread for comment $comment_id."
+                else
+                  echo "::warning::Could not resolve the review thread for comment $comment_id."
+                fi
+              done
+            else
+              echo "::warning::Could not load review threads; accepted threads were not resolved."
+            fi
+          fi
+
+          # 5. Labels: add review:<verdict>, remove the other review:* label.
+          if [ "$verdict" = "approve" ]; then
+            add_label="review:approved"
+            remove_label="review:changes-requested"
+          else
+            add_label="review:changes-requested"
+            remove_label="review:approved"
+          fi
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=$add_label" > /dev/null
+          remove_label_encoded="$(jq -rn --arg label "$remove_label" '$label | @uri')"
+          # A 404 here just means the label wasn't on the PR.
+          gh api --method DELETE "repos/$REPO/issues/$PR_NUMBER/labels/$remove_label_encoded" > /dev/null 2>&1 || true
+
+          # 6. Commit status "Claude verdict". Description = first 140 characters of the summary.
+          description="$(jq -r '.summary | gsub("\\s+"; " ") | .[0:140]' <<< "$REVIEW_JSON")"
+          if [ "$verdict" = "approve" ]; then
+            set_status success "$description"
+          else
+            set_status failure "$description"
+          fi
