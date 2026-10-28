@@ -86,7 +86,7 @@ jobs:
 
             ## Read first
             1. The PR: `gh pr view ${{ github.event.pull_request.number }} --json title,body,closingIssuesReferences,files` and the diff: `gh pr diff ${{ github.event.pull_request.number }}`.
-            2. The linked issue (the `Closes #n` in the PR body, or `closingIssuesReferences`): `gh issue view <n>`. Note its acceptance criteria and, for agent PRs, its "Files in scope" and "Out of scope" sections.
+            2. The linked issue (the `Closes #n` in the PR body, or `closingIssuesReferences`): `gh issue view <n>`. Note its acceptance criteria and, for agent PRs.
             3. `CLAUDE.md` at the repo root, if it exists. Its rules apply to this PR.
             4. Your earlier review on this PR, if any:
                - inline comments: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`. Your comments are the ones by `claude[bot]`. Replies to a comment have `in_reply_to_id` set to that comment's id; read every reply.
@@ -99,7 +99,6 @@ jobs:
             3. Correctness: bugs, type errors, missing imports, broken commands, wrong logic.
             4. Agent PRs only, the guardrails:
                - about 200 changed lines of code or fewer;
-               - only touches files listed in the issue's "Files in scope";
                - no backend/netcode changes (`apps/server/**`, `packages/shared/**`) and no CI changes (`.github/**`) unless the issue scopes them.
 
             ## Blocking vs non-blocking
