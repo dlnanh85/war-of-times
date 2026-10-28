@@ -13,4 +13,4 @@ Closes #
 ## Checklist
 
 - [ ] `yarn lint`, `yarn typecheck` and `yarn test` pass (skip if `package.json` doesn't exist yet)
-- [ ] Changes stay within the issue's "Files in scope"
+- [ ] Changes stay within the issue's scope
