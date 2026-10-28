@@ -30,3 +30,18 @@ body:
     attributes:
       label: Additional context
       description: Screenshots, mockups, references.
+  - type: textarea
+    id: files_in_scope
+    attributes:
+      label: Files in scope
+      description: Paths or globs the change may touch. The agent may only change these files.
+      placeholder: |
+        apps/client/src/ui/**
+        README.md
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: Things this issue should NOT change (optional).
