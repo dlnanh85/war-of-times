@@ -8,7 +8,10 @@
 #   - a commit status named "Claude verdict" (success / failure).
 # Claude itself can't approve PRs, so "Claude verdict" is what branch protection checks.
 #
-# See .agents/docs/agent-workflow-impl-plan.md, phase P1.
+# Agent PRs (branch `agent/*`) with changes requested go to the fixer (job `fix`), up to
+# AGENT_MAX_ROUNDS rounds; after that the PR is handed to the TL (job `give-up`).
+#
+# See .agents/docs/agent-workflow-impl-plan.md, phases P1 and P4.
 
 name: Claude Code Review
 
@@ -269,3 +272,50 @@ jobs:
           else
             set_status failure "$description"
           fi
+
+  # Agent PRs only: when changes are requested and the round limit isn't reached, let the agent fix them.
+  # The fixer pushes as claude[bot], which starts a new review run (queued behind this one).
+  fix:
+    needs: review
+    if: >-
+      needs.review.outputs.verdict == 'changes_requested' &&
+      startsWith(github.head_ref, 'agent/') &&
+      fromJSON(needs.review.outputs.round) < fromJSON(vars.AGENT_MAX_ROUNDS || '3')
+    uses: ./.github/workflows/agent-fix.yml
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      round: ${{ fromJSON(needs.review.outputs.round) }}
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+  # Agent PRs only: too many rounds without approval. Stop the loop and hand the PR to the TL.
+  give-up:
+    needs: review
+    if: >-
+      needs.review.outputs.verdict == 'changes_requested' &&
+      startsWith(github.head_ref, 'agent/') &&
+      fromJSON(needs.review.outputs.round) >= fromJSON(vars.AGENT_MAX_ROUNDS || '3')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      ROUND: ${{ needs.review.outputs.round }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Hand over to TL
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
+          comment_file="$RUNNER_TEMP/give-up-comment.md"
+          printf '🤖 %s review rounds without approval. The agent has stopped; tech lead, please take over.\n\n<sub>[Run log](%s)</sub>\n' \
+            "$ROUND" "$RUN_URL" > "$comment_file"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
