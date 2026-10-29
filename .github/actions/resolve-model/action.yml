@@ -1,0 +1,118 @@
+# Picks the Claude model for an issue from its "Story point" on the project board:
+#   Story point >= opus-min-points -> opus, anything else -> sonnet.
+# Story point lives on the project item (not the issue), so it's read with GraphQL.
+# This action never fails: if anything goes wrong it falls back to sonnet and logs a warning.
+#
+# See .agents/docs/agent-workflow-impl-plan.md, phase P3.
+
+name: Resolve model
+description: Choose opus or sonnet for an issue based on its Story point on the project board.
+
+inputs:
+  issue-number:
+    description: The issue to look up.
+    required: true
+  token:
+    description: Token that can read the project board (pass secrets.PROJECT_TOKEN).
+    required: true
+  project-owner:
+    description: Owner of the project board (pass vars.PROJECT_OWNER). Defaults to the repo owner.
+    required: false
+    default: ""
+  project-number:
+    description: Number of the project board (pass vars.PROJECT_NUMBER). Defaults to 1.
+    required: false
+    default: ""
+  field:
+    description: Name of the Story point field (pass vars.STORY_POINT_FIELD). Defaults to "Story point".
+    required: false
+    default: ""
+  opus-min-points:
+    description: Story point at or above which opus is used (pass vars.OPUS_MIN_POINTS). Defaults to 5.
+    required: false
+    default: ""
+
+outputs:
+  model:
+    description: "opus or sonnet"
+    value: ${{ steps.resolve.outputs.model }}
+  story-point:
+    description: The Story point found, or empty if none.
+    value: ${{ steps.resolve.outputs.story-point }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve model from Story point
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        PROJECT_OWNER: ${{ inputs.project-owner }}
+        PROJECT_NUMBER: ${{ inputs.project-number }}
+        FIELD: ${{ inputs.field }}
+        OPUS_MIN_POINTS: ${{ inputs.opus-min-points }}
+      run: |
+        set -euo pipefail
+
+        # Empty inputs (for example an unset repo variable) fall back to the defaults.
+        owner="${PROJECT_OWNER:-${REPO%%/*}}"
+        project_number="${PROJECT_NUMBER:-1}"
+        field="${FIELD:-Story point}"
+        min_points="${OPUS_MIN_POINTS:-5}"
+        number_regex='^[0-9]+([.][0-9]+)?$'
+        if ! [[ "$min_points" =~ $number_regex ]]; then
+          echo "::warning::OPUS_MIN_POINTS is not a number ('$min_points'); using 5."
+          min_points=5
+        fi
+
+        # shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell variables
+        query='query($owner: String!, $repo: String!, $number: Int!, $field: String!) {
+          repository(owner: $owner, name: $repo) {
+            issue(number: $number) {
+              projectItems(first: 20) {
+                nodes {
+                  project { number owner { ... on User { login } ... on Organization { login } } }
+                  fieldValueByName(name: $field) {
+                    ... on ProjectV2ItemFieldNumberValue { number }
+                  }
+                }
+              }
+            }
+          }
+        }'
+
+        points=""
+        error_file="$(mktemp)"
+        if result="$(gh api graphql -f query="$query" \
+              -f owner="${REPO%%/*}" -f repo="${REPO#*/}" \
+              -F number="$ISSUE_NUMBER" -f field="$field" 2> "$error_file")"; then
+          # Pick the item on our project board and read its Story point.
+          points="$(jq -r --arg owner "$owner" --arg project "$project_number" '
+            [.data.repository.issue.projectItems.nodes[]?
+              | select((.project.number | tostring) == $project and .project.owner.login == $owner)
+              | .fieldValueByName.number // empty]
+            | first // empty' <<< "$result" 2> /dev/null || true)"
+        else
+          echo "::warning::Could not read the project board for #$ISSUE_NUMBER: $(head -n 1 "$error_file")"
+        fi
+
+        if [[ "$points" =~ $number_regex ]]; then
+          if awk -v p="$points" -v m="$min_points" 'BEGIN { exit !(p + 0 >= m + 0) }'; then
+            model=opus
+          else
+            model=sonnet
+          fi
+        else
+          echo "::warning::Story point not found for #$ISSUE_NUMBER — using sonnet"
+          points=""
+          model=sonnet
+        fi
+
+        echo "Issue #$ISSUE_NUMBER: Story point = ${points:-none} → model = $model"
+        {
+          echo "model=$model"
+          echo "story-point=$points"
+        } >> "$GITHUB_OUTPUT"

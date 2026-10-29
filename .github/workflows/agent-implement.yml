@@ -1,0 +1,236 @@
+# Agent implementer.
+#
+# Takes one issue and tries to implement it:
+#   1. Resolve model: pick opus or sonnet from the issue's Story point on the board.
+#   2. Gate check (cheap sonnet run): is the issue clear and safe to do? If not, label and comment, then stop.
+#   3. Implement: Claude creates `agent/issue-<n>`, commits, and opens a PR as claude[bot].
+#      Because the PR comes from the Claude app (not GITHUB_TOKEN), it triggers the reviewer.
+#   4. Verify: if no PR exists afterwards (or anything failed), hand the issue to the TL with `needs-tl`.
+#
+# Started by the picker (workflow_call, from P5) or by hand from the Actions tab (workflow_dispatch).
+# See .agents/docs/agent-workflow-impl-plan.md, phase P3.
+
+name: Agent Implement
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        type: number
+        required: true
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to implement
+        type: number
+        required: true
+
+permissions: {}
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # One implementer at a time. Set on the job (not the workflow) so it also applies
+    # when this workflow is called from the picker.
+    concurrency:
+      group: agent-implement
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    # GH_TOKEN is NOT set here on purpose: the Claude steps must use the Claude app token,
+    # so the PR is opened by claude[bot] and triggers the reviewer. Bash steps set it themselves.
+    env:
+      REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      BRANCH: agent/issue-${{ inputs.issue_number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Mark issue in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The picker already adds this label; manual runs need it too, so the picker won't pick the issue again.
+          gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/labels" -f "labels[]=agent:in-progress" > /dev/null
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ hashFiles('.nvmrc') != '' && '.nvmrc' || '' }}
+          node-version: ${{ hashFiles('.nvmrc') == '' && '22' || '' }}
+          cache: ${{ hashFiles('yarn.lock') != '' && 'yarn' || '' }}
+
+      - name: Install dependencies
+        if: hashFiles('yarn.lock') != ''
+        run: |
+          set -euo pipefail
+          yarn install --frozen-lockfile
+
+      - name: Resolve model
+        id: model
+        uses: ./.github/actions/resolve-model
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+          field: ${{ vars.STORY_POINT_FIELD }}
+          opus-min-points: ${{ vars.OPUS_MIN_POINTS }}
+
+      - name: Gate check
+        id: gate
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model sonnet
+            --max-turns 10
+            --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr list:*),Bash(gh pr diff:*)"
+            --json-schema '{"type":"object","required":["eligible","retry_later","reason"],"properties":{"eligible":{"type":"boolean"},"retry_later":{"type":"boolean"},"reason":{"type":"string"}}}'
+          prompt: |
+            You are the safety gate for an AI agent that implements GitHub issues in ${{ github.repository }}.
+            Decide whether the agent can safely start issue #${{ inputs.issue_number }}. You only read; you change nothing.
+
+            ## Read
+            1. The issue: `gh issue view ${{ inputs.issue_number }}`.
+            2. `CLAUDE.md` at the repo root (especially "Agent rules").
+            3. Open agent PRs: `gh pr list --state open --json number,headRefName,title --jq '.[] | select(.headRefName | startswith("agent/"))'`, and for each one its changed files: `gh pr diff <number> --name-only`.
+
+            ## Important
+            The tech lead already decided this task suits the agent by adding the `agent-ready` label.
+            Do NOT judge its size or difficulty. Only check that it can be done safely.
+
+            ## Rules
+            - `eligible: true` only if ALL of these hold:
+              - the acceptance criteria are filled in and clear enough to check;
+              - the scope is filled in and clear (a "Scope" section with "In scope" / "Out of scope", or an equally clear description of what to change and what not to);
+              - the task respects the agent rules in CLAUDE.md (for example: no backend/netcode or CI changes unless the scope explicitly includes them).
+            - If the issue is fine, but the work in its scope would likely touch the same area as an open `agent/*` PR (compare with that PR's changed files): `eligible: false, retry_later: true`.
+            - Otherwise, if something is missing or unclear: `eligible: false, retry_later: false`.
+            - `retry_later` is false whenever `eligible` is true.
+
+            ## Output
+            Return the structured result. `reason` is 1–3 plain-English sentences for the tech lead. If not eligible, say exactly what is missing or unclear, or which open PR overlaps.
+            Never write the text "@claude".
+
+      - name: Read gate result
+        id: gate_result
+        env:
+          GATE_JSON: ${{ steps.gate.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$GATE_JSON" | jq -e '
+              (.eligible | type == "boolean")
+              and (.retry_later | type == "boolean")
+              and (.reason | type == "string")' > /dev/null 2>&1; then
+            echo "::error::The gate check did not return a valid result (structured_output is missing or invalid)."
+            exit 1
+          fi
+          eligible="$(jq -r '.eligible' <<< "$GATE_JSON")"
+          retry_later="$(jq -r '.retry_later' <<< "$GATE_JSON")"
+          echo "Gate: eligible=$eligible retry_later=$retry_later"
+          echo "Reason: $(jq -r '.reason' <<< "$GATE_JSON")"
+          {
+            echo "eligible=$eligible"
+            echo "retry_later=$retry_later"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Gate failed
+        if: steps.gate_result.outputs.eligible == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATE_JSON: ${{ steps.gate.outputs.structured_output }}
+          RETRY_LATER: ${{ steps.gate_result.outputs.retry_later }}
+        run: |
+          set -euo pipefail
+          reason="$(jq -r '.reason' <<< "$GATE_JSON")"
+          comment_file="$RUNNER_TEMP/gate-comment.md"
+
+          # A 404 here just means the label wasn't on the issue.
+          gh api --method DELETE "repos/$REPO/issues/$ISSUE_NUMBER/labels/agent%3Ain-progress" > /dev/null 2>&1 || true
+
+          if [ "$RETRY_LATER" = "true" ]; then
+            printf '🤖 The agent did not start this issue yet.\n\n%s\n\nIt will retry on a later night.\n\n<sub>[Run log](%s)</sub>\n' \
+              "$reason" "$RUN_URL" > "$comment_file"
+          else
+            gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/labels" -f "labels[]=agent:needs-info" > /dev/null
+            # shellcheck disable=SC2016 # the backticks are Markdown, not a command
+            printf '🤖 The agent cannot start this issue safely.\n\n%s\n\nPlease update the issue, then remove the `agent:needs-info` label so the agent can pick it up again.\n\n<sub>[Run log](%s)</sub>\n' \
+              "$reason" "$RUN_URL" > "$comment_file"
+          fi
+          gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+      - name: Implement
+        id: impl
+        if: steps.gate_result.outputs.eligible == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model ${{ steps.model.outputs.model }}
+            --max-turns 60
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(yarn:*),Bash(git:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh issue comment:*)"
+          prompt: |
+            You are an AI agent implementing issue #${{ inputs.issue_number }} in ${{ github.repository }}.
+
+            ## Steps
+            1. Read the issue: `gh issue view ${{ inputs.issue_number }}`. Read `CLAUDE.md` and follow its "Agent rules".
+            2. Create the branch `agent/issue-${{ inputs.issue_number }}` from `main` (you are on `main` now).
+               If that branch already exists on `origin` from an earlier attempt, start fresh from `main` anyway and overwrite it with `git push --force-with-lease`.
+            3. Implement the issue. Stay inside its scope; make no unrelated changes.
+            4. Commit in small steps with clear messages that say what changed.
+            5. If `package.json` exists, run `yarn lint`, `yarn typecheck` and `yarn test` (the ones that exist) and fix any failures.
+            6. Push the branch: `git push -u origin agent/issue-${{ inputs.issue_number }}`.
+            7. Open a PR with `gh pr create --base main --head agent/issue-${{ inputs.issue_number }}`.
+               Fill the body using `.github/pull_request_template.md`, with `Closes #${{ inputs.issue_number }}` on its own line.
+
+            ## If you can't finish
+            Do not open a PR. Instead comment on the issue with `gh issue comment ${{ inputs.issue_number }}` explaining what blocked you, in plain English.
+
+            ## Hard rules
+            - Never write the text "@claude" anywhere (code, commits, PR, comments).
+            - Never merge a PR.
+            - Never push to `main`.
+
+      - name: Verify PR
+        id: verify
+        if: ${{ !cancelled() && steps.gate_result.outputs.eligible == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr_url="$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -n "$pr_url" ]; then
+            echo "PR opened: $pr_url"
+          else
+            echo "::warning::No open PR found for $BRANCH."
+          fi
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      # Runs when anything failed, or when the gate passed but no PR was opened.
+      - name: Hand over to TL
+        if: >-
+          ${{ !cancelled() && (failure() ||
+          (steps.gate_result.outputs.eligible == 'true' && steps.verify.outputs.pr_url == '')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/$REPO/issues/$ISSUE_NUMBER/labels/agent%3Ain-progress" > /dev/null 2>&1 || true
+          gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
+          comment_file="$RUNNER_TEMP/handover-comment.md"
+          printf '🤖 The agent could not finish this issue and opened no PR. The tech lead needs to take over.\n\nSee the [run log](%s) for what happened.\n' \
+            "$RUN_URL" > "$comment_file"
+          gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -F body=@"$comment_file" > /dev/null
