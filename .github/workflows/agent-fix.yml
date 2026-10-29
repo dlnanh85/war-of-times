@@ -1,0 +1,162 @@
+# Agent fixer.
+#
+# Called by the reviewer (claude-code-review.yml, job `fix`) when an agent PR gets "changes requested".
+# For each blocking review comment, Claude either fixes it or pushes back with a reply that cites evidence.
+# It then pushes ONCE, as claude[bot]. That push triggers a new review run, which sees the fixes and the
+# replies. That's the review ↔ fix loop. If nothing gets pushed, the PR is handed to the TL with `needs-tl`.
+#
+# See .agents/docs/agent-workflow-impl-plan.md, phase P4.
+
+name: Agent Fix
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        type: number
+        required: true
+      round:
+        type: number
+        required: true
+
+permissions: {}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    # GH_TOKEN is NOT set here on purpose: the Claude step must push with the Claude app token,
+    # so the push triggers the reviewer again. Bash steps set it themselves.
+    env:
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Read PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName,headRefOid,closingIssuesReferences)"
+          branch="$(jq -r '.headRefName' <<< "$pr_json")"
+          head_sha="$(jq -r '.headRefOid' <<< "$pr_json")"
+
+          # Linked issue: the PR's "Closes #n", or else the n in the branch name agent/issue-<n>.
+          issue="$(jq -r '.closingIssuesReferences[0].number // empty' <<< "$pr_json")"
+          if [ -z "$issue" ] && [[ "$branch" =~ ^agent/issue-([0-9]+)$ ]]; then
+            issue="${BASH_REMATCH[1]}"
+          fi
+          if [ -z "$issue" ]; then
+            echo "::warning::No linked issue found for PR #$PR_NUMBER; the model will be sonnet."
+          fi
+
+          echo "PR #$PR_NUMBER: branch=$branch head=$head_sha issue=${issue:-none}"
+          {
+            echo "branch=$branch"
+            echo "head_sha=$head_sha"
+            echo "issue=$issue"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ hashFiles('.nvmrc') != '' && '.nvmrc' || '' }}
+          node-version: ${{ hashFiles('.nvmrc') == '' && '22' || '' }}
+          cache: ${{ hashFiles('yarn.lock') != '' && 'yarn' || '' }}
+
+      - name: Install dependencies
+        if: hashFiles('yarn.lock') != ''
+        run: |
+          set -euo pipefail
+          yarn install --frozen-lockfile
+
+      - name: Resolve model
+        id: model
+        if: steps.pr.outputs.issue != ''
+        uses: ./.github/actions/resolve-model
+        with:
+          issue-number: ${{ steps.pr.outputs.issue }}
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+          field: ${{ vars.STORY_POINT_FIELD }}
+          opus-min-points: ${{ vars.OPUS_MIN_POINTS }}
+
+      - name: Fix review comments
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The review run that calls this was usually started by a claude[bot] push. No other bots.
+          allowed_bots: claude
+          claude_args: |
+            --model ${{ steps.model.outputs.model || 'sonnet' }}
+            --max-turns 40
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(yarn:*),Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*)"
+          prompt: |
+            You are an AI agent fixing review feedback on PR #${{ inputs.pr_number }} in ${{ github.repository }}.
+            This is review round ${{ inputs.round }}. You are on the PR's branch `${{ steps.pr.outputs.branch }}`.
+            The linked issue is #${{ steps.pr.outputs.issue || 'unknown' }}.
+
+            ## Read first
+            1. `CLAUDE.md` (agent rules) and the linked issue's acceptance criteria and scope (`gh issue view <issue number>`).
+            2. The latest review summary: `gh pr view ${{ inputs.pr_number }} --comments`. Use the LAST comment containing `<!-- claude-review:verdict=`. Its "Blocking" list is what you must handle. Ignore "Non-blocking".
+            3. The inline review comments and their replies: `gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }}/comments --paginate`. The reviewer's comments are by `claude[bot]`; replies have `in_reply_to_id` set.
+            4. The current diff: `gh pr diff ${{ inputs.pr_number }}`.
+
+            ## For EACH blocking issue, choose one
+            - Fix it. Change only what's needed for that issue; don't refactor anything else.
+            - Push back. Reply in that comment's thread:
+              `gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }}/comments/<comment_id>/replies -f body="..."`
+              explaining why it shouldn't change. The reason MUST cite something concrete: the issue's acceptance criteria, a CLAUDE.md rule, a test result, or documentation. "I disagree" alone is not allowed.
+              If the reviewer already answered your earlier push-back on that comment and held its position with a new argument, don't push back again: fix it.
+              Blocking issues that have no inline comment (only in the summary list) can't get a thread reply; fix those.
+
+            ## Order and pushing (exactly one push)
+            1. Post all push-back replies first, so they exist before the next review starts.
+            2. Make the fixes as normal, meaningful commits. The message names what was fixed (for example "Fix off-by-one in gold income").
+            3. If `package.json` exists, run `yarn lint`, `yarn typecheck` and `yarn test` (the ones that exist) and fix failures.
+            4. Push once, at the end: `git push origin ${{ steps.pr.outputs.branch }}`. That push starts the next review.
+            5. Only if there was nothing to fix (every blocking issue got a push-back reply): make an empty commit instead,
+               `git commit --allow-empty -m "Reply to review comments"`, and push that.
+               Never add an empty commit when there are real fix commits. Never push more than once. Never force-push.
+
+            ## Hard rules
+            - Never write the text "@claude" anywhere (code, commits, replies).
+            - Never merge the PR, and never push to `main`.
+            - Don't post a summary comment on the PR; only reply in review threads.
+
+      - name: Check that something was pushed
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          OLD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          new_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')"
+          if [ "$new_sha" != "$OLD_SHA" ]; then
+            echo "Pushed: $BRANCH is now at $new_sha (was $OLD_SHA). The reviewer will run again."
+            exit 0
+          fi
+
+          echo "::warning::Nothing was pushed to $BRANCH. Handing the PR to the TL."
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
+          comment_file="$RUNNER_TEMP/fix-handover-comment.md"
+          printf '🤖 The agent could not address the review on this PR (nothing was pushed). The tech lead needs to take over.\n\nSee the [run log](%s) for what happened.\n' \
+            "$RUN_URL" > "$comment_file"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
