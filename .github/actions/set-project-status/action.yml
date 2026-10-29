@@ -1,0 +1,87 @@
+# Moves an issue to a Status column on the project board (adds it to the board first if missing).
+# All IDs (project, Status field, option, item) are looked up by name at runtime, so nothing is hard-coded.
+# Fails with a clear message if something can't be found. Callers set `continue-on-error: true`,
+# because a board update must never fail the workflow.
+#
+# The board is user-owned, so the token must be a classic PAT with `project` scope (secrets.PROJECT_TOKEN).
+# See .agents/docs/agent-workflow-impl-plan.md, phase P6.
+
+name: Set project status
+description: Move an issue to a Status column (Todo, In Progress, Blocked, ...) on the project board.
+
+inputs:
+  issue-number:
+    description: The issue to move.
+    required: true
+  status:
+    description: "Exact Status name: Backlog, Todo, Blocked, In Progress, Under Review or Done."
+    required: true
+  token:
+    description: Token that can edit the project board (pass secrets.PROJECT_TOKEN).
+    required: true
+  project-owner:
+    description: Owner of the project board (pass vars.PROJECT_OWNER). Defaults to the repo owner.
+    required: false
+    default: ""
+  project-number:
+    description: Number of the project board (pass vars.PROJECT_NUMBER). Defaults to 1.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set project status
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        STATUS: ${{ inputs.status }}
+        PROJECT_OWNER: ${{ inputs.project-owner }}
+        PROJECT_NUMBER: ${{ inputs.project-number }}
+      run: |
+        set -euo pipefail
+
+        owner="${PROJECT_OWNER:-${REPO%%/*}}"
+        number="${PROJECT_NUMBER:-1}"
+        fail() {
+          echo "::warning::Board update skipped for #$ISSUE_NUMBER → '$STATUS': $1"
+          exit 1
+        }
+
+        # 1. Project ID.
+        project_id="$(gh project view "$number" --owner "$owner" --format json --jq '.id')" \
+          || fail "could not read project $owner/$number (check PROJECT_TOKEN has the 'project' scope)."
+
+        # 2. Status field ID and the option ID for the wanted status, by name.
+        fields="$(gh project field-list "$number" --owner "$owner" --format json --limit 100)" \
+          || fail "could not read the project's fields."
+        field_id="$(jq -r '.fields[] | select(.name == "Status") | .id' <<< "$fields")"
+        [ -n "$field_id" ] || fail "the project has no field named 'Status'."
+        option_id="$(jq -r --arg status "$STATUS" \
+          '.fields[] | select(.name == "Status") | .options[] | select(.name == $status) | .id' <<< "$fields")"
+        if [ -z "$option_id" ]; then
+          known="$(jq -r '[.fields[] | select(.name == "Status") | .options[].name] | join(", ")' <<< "$fields")"
+          fail "no Status option named '$STATUS' (the board has: $known)."
+        fi
+
+        # 3. The issue's item on the board. Add the issue if it isn't there yet.
+        items="$(gh project item-list "$number" --owner "$owner" --format json --limit 500)" \
+          || fail "could not list the project's items."
+        item_id="$(jq -r --arg repo "$REPO" --argjson n "$ISSUE_NUMBER" \
+          '[.items[] | select(.content.type == "Issue" and .content.repository == $repo and .content.number == $n) | .id]
+           | first // empty' <<< "$items")"
+        if [ -z "$item_id" ]; then
+          echo "Issue #$ISSUE_NUMBER is not on the board yet; adding it."
+          item_id="$(gh project item-add "$number" --owner "$owner" \
+            --url "$SERVER_URL/$REPO/issues/$ISSUE_NUMBER" --format json --jq '.id')" \
+            || fail "could not add the issue to the board."
+        fi
+
+        # 4. Set the Status.
+        gh project item-edit --id "$item_id" --project-id "$project_id" \
+          --field-id "$field_id" --single-select-option-id "$option_id" > /dev/null \
+          || fail "could not edit the board item."
+        echo "Issue #$ISSUE_NUMBER moved to '$STATUS' on project $owner/$number."

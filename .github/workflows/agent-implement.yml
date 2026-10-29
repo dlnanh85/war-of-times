@@ -172,6 +172,18 @@ jobs:
           fi
           gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -F body=@"$comment_file" > /dev/null
 
+      # "Retry later" leaves the card in Todo; "needs info" moves it to Blocked.
+      - name: "Board: Blocked (needs info)"
+        if: steps.gate_result.outputs.eligible == 'false' && steps.gate_result.outputs.retry_later == 'false'
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+
       - name: Implement
         id: impl
         if: steps.gate_result.outputs.eligible == 'true'
@@ -219,11 +231,24 @@ jobs:
           fi
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
 
-      # Runs when anything failed, or when the gate passed but no PR was opened.
+      - name: "Board: Under Review"
+        if: ${{ !cancelled() && steps.verify.outputs.pr_url != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          status: Under Review
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+
+      # Runs when there is no PR and either something failed or the gate passed.
+      # If a PR exists (even after a later failure, e.g. max turns), the reviewer takes it from here.
       - name: Hand over to TL
+        id: handover
         if: >-
-          ${{ !cancelled() && (failure() ||
-          (steps.gate_result.outputs.eligible == 'true' && steps.verify.outputs.pr_url == '')) }}
+          ${{ !cancelled() && steps.verify.outputs.pr_url == '' &&
+          (failure() || steps.gate_result.outputs.eligible == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -234,3 +259,14 @@ jobs:
           printf '🤖 The agent could not finish this issue and opened no PR. The tech lead needs to take over.\n\nSee the [run log](%s) for what happened.\n' \
             "$RUN_URL" > "$comment_file"
           gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+      - name: "Board: Blocked (handed over)"
+        if: ${{ !cancelled() && steps.handover.outcome != 'skipped' && steps.handover.outcome != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
