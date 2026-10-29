@@ -1,0 +1,129 @@
+# Agent picker.
+#
+# Every night (and on demand) picks at most ONE `agent-ready` issue and hands it to the implementer.
+# The `select` job uses no AI: just gh + jq. It skips the night when:
+#   - an agent PR is still in the review/fix loop,
+#   - too many approved agent PRs are waiting for the TL to merge,
+#   - an issue is marked `agent:in-progress` but has no open PR (a human should look).
+# Otherwise it takes the `Todo` issue with the earliest milestone due date (then the oldest issue).
+#
+# Note: scheduled workflows only run from the default branch (main), and cron times are UTC.
+# See .agents/docs/agent-workflow-impl-plan.md, phase P5.
+
+name: Agent Pick
+
+on:
+  schedule:
+    - cron: '0 19 * * *' # 02:00 Asia/Saigon (UTC+7)
+  workflow_dispatch:
+
+concurrency:
+  group: agent-pick
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+      contents: read
+    outputs:
+      issue_number: ${{ steps.pick.outputs.issue_number }}
+    steps:
+      - name: Pick an issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          REPO: ${{ github.repository }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          AGENT_MAX_WAITING: ${{ vars.AGENT_MAX_WAITING }}
+        run: |
+          set -euo pipefail
+          project_owner="${PROJECT_OWNER:-${REPO%%/*}}"
+          project_number="${PROJECT_NUMBER:-1}"
+          max_waiting="${AGENT_MAX_WAITING:-3}"
+
+          # Open agent PRs (branch agent/*) with their label names.
+          agent_prs="$(gh pr list --repo "$REPO" --state open --limit 200 --json number,headRefName,labels \
+            --jq '[.[] | select(.headRefName | startswith("agent/"))
+                       | {number, branch: .headRefName, labels: [.labels[].name]}]')"
+
+          # 1. In-loop check: an agent PR that is neither approved nor handed to the TL is still being worked on.
+          busy="$(jq -r '[.[] | select((.labels | index("review:approved") | not) and (.labels | index("needs-tl") | not))
+                          | "#\(.number)"] | join(", ")' <<< "$agent_prs")"
+          if [ -n "$busy" ]; then
+            echo "Agent busy: PR $busy is still in the review/fix loop. Nothing picked tonight."
+            exit 0
+          fi
+
+          # 2. Waiting cap: too many approved agent PRs waiting for the TL to merge.
+          waiting="$(jq '[.[] | select(.labels | index("review:approved"))] | length' <<< "$agent_prs")"
+          if [ "$waiting" -ge "$max_waiting" ]; then
+            echo "Waiting for TL merges: $waiting approved agent PRs are open (limit $max_waiting). Nothing picked tonight."
+            exit 0
+          fi
+
+          # 3. Stale guard: an issue marked in progress, but with no open agent PR.
+          in_progress="$(gh issue list --repo "$REPO" --state open --label "agent:in-progress" --limit 100 \
+            --json number --jq '.[].number')"
+          for n in $in_progress; do
+            if ! jq -e --arg branch "agent/issue-$n" 'any(.[]; .branch == $branch)' <<< "$agent_prs" > /dev/null; then
+              echo "::warning::Issue #$n has the agent:in-progress label but no open PR. A human should check it (remove the label to unblock the picker). Nothing picked tonight."
+              exit 0
+            fi
+          done
+
+          # 4. Candidates: agent-ready issues that are not already taken or blocked.
+          candidates="$(gh issue list --repo "$REPO" --state open --label "agent-ready" --limit 200 \
+            --json number,createdAt,milestone,labels \
+            --jq '[.[] | select([.labels[].name] | any(. == "agent:in-progress" or . == "agent:needs-info" or . == "needs-tl") | not)
+                       | {number, createdAt, dueOn: (.milestone.dueOn // null)}]')"
+          if [ "$(jq 'length' <<< "$candidates")" -eq 0 ]; then
+            echo "No agent-ready issues to pick."
+            exit 0
+          fi
+
+          # 5. Board filter: keep only issues whose Status on the project board is "Todo".
+          #    The board is user-owned, so this read needs PROJECT_TOKEN (GITHUB_TOKEN can't see it).
+          if ! board="$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$project_number" --owner "$project_owner" \
+                --format json --limit 500)"; then
+            echo "::warning::Could not read the project board; nothing picked tonight."
+            exit 0
+          fi
+          todo_numbers="$(jq -c --arg repo "$REPO" '[.items[]
+            | select(.content.type == "Issue" and .content.repository == $repo and .status == "Todo")
+            | .content.number]' <<< "$board")"
+
+          # 6. Sort: earliest milestone due date first (no milestone = last), then oldest issue. Take the first.
+          issue_number="$(jq -r --argjson todo "$todo_numbers" '
+            [.[] | select(.number as $n | $todo | index($n))]
+            | sort_by([(.dueOn // "9999-12-31"), .createdAt])
+            | .[0].number // empty' <<< "$candidates")"
+          if [ -z "$issue_number" ]; then
+            echo "No agent-ready issue is in Todo on the board."
+            exit 0
+          fi
+
+          # 7. Take it.
+          gh api --method POST "repos/$REPO/issues/$issue_number/labels" -f "labels[]=agent:in-progress" > /dev/null
+          echo "Picked issue #$issue_number."
+          echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+
+  implement:
+    needs: select
+    if: needs.select.outputs.issue_number != ''
+    uses: ./.github/workflows/agent-implement.yml
+    with:
+      issue_number: ${{ fromJSON(needs.select.outputs.issue_number) }}
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
