@@ -172,7 +172,7 @@ jobs:
           fi
           gh api --method POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -F body=@"$comment_file" > /dev/null
 
-      # "Retry later" leaves the card in Todo; "needs info" moves it to Blocked.
+      # "Retry later" moves the card back to Todo; "needs info" moves it to Blocked.
       - name: "Board: Blocked (needs info)"
         if: steps.gate_result.outputs.eligible == 'false' && steps.gate_result.outputs.retry_later == 'false'
         continue-on-error: true
@@ -180,6 +180,17 @@ jobs:
         with:
           issue-number: ${{ inputs.issue_number }}
           status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+
+      - name: "Board: Todo (retry later)"
+        if: steps.gate_result.outputs.eligible == 'false' && steps.gate_result.outputs.retry_later == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          status: Todo
           token: ${{ secrets.PROJECT_TOKEN }}
           project-owner: ${{ vars.PROJECT_OWNER }}
           project-number: ${{ vars.PROJECT_NUMBER }}
