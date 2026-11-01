@@ -57,6 +57,8 @@ These apply to the Claude reviewer on every PR (TL and agent).
 
 Non-blocking notes go only in the review summary, never as inline comments (every inline thread must be resolved before merging).
 
+**Foundation concerns** (never blocking on their own): if the PR builds on existing code or a decision outside the diff that looks wrong, list it under "Foundation concerns (for the TL)" in the summary, with evidence, why, and a suggested follow-up. Also respond to each point in the PR's "## Concerns" section.
+
 **Backend "why" — only on comments.** The TL is a frontend developer who is new to backend code.
 
 - Never explain backend code you have no comment about. No comment means no explanation.

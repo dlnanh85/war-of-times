@@ -275,6 +275,8 @@ jobs:
           # Never fails: a missing or invalid result just means outcome is empty (Verify decides from there).
           outcome="$(printf '%s' "$IMPL_JSON" | jq -r '.outcome // empty' 2> /dev/null || true)"
           echo "Implement outcome: ${outcome:-unknown}"
+          # The concerns are already in the PR body; log them here too for the run summary.
+          printf '%s' "$IMPL_JSON" | jq -r '(.concerns // [])[] | "Concern: \(.)"' 2> /dev/null || true
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 
       - name: Verify PR
@@ -292,8 +294,10 @@ jobs:
           fi
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
 
+      # Not after an escalation: an old PR from an earlier attempt may still be open, but the
+      # agent stopped this time, so the card goes to Blocked instead (see "Escalate").
       - name: "Board: Under Review"
-        if: ${{ !cancelled() && steps.verify.outputs.pr_url != '' }}
+        if: ${{ !cancelled() && steps.verify.outputs.pr_url != '' && steps.impl_result.outputs.outcome != 'escalated' }}
         continue-on-error: true
         uses: ./.github/actions/set-project-status
         with:
@@ -305,10 +309,11 @@ jobs:
 
       # The agent stopped on purpose: the issue would build on code or a decision it believes is wrong.
       # This is a decision request for the TL, not a failure. Escalation comes from the gate or from Implement.
+      # It doesn't depend on whether a PR exists: an old PR from an earlier attempt must not hide it.
       - name: Escalate
         id: escalate
         if: >-
-          ${{ !cancelled() && steps.verify.outputs.pr_url == '' &&
+          ${{ !cancelled() &&
           (steps.gate_result.outputs.escalate == 'true' || steps.impl_result.outputs.outcome == 'escalated') }}
         env:
           GH_TOKEN: ${{ github.token }}

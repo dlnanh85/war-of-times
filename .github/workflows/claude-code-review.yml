@@ -42,6 +42,7 @@ jobs:
     outputs:
       verdict: ${{ steps.verdict.outputs.verdict }}
       round: ${{ steps.verdict.outputs.round }}
+      needs_tl: ${{ steps.verdict.outputs.needs_tl }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -287,12 +288,22 @@ jobs:
             set_status failure "$description"
           fi
 
+          # 7. Is the PR waiting for the TL (`needs-tl`)? Read the labels NOW, not from the event:
+          #    the fixer adds `needs-tl` after its push, so the push event doesn't include it yet. This run
+          #    starts only after the fixer's run has finished (concurrency queue), so the label is there by now.
+          #    Used by the `fix` and `give-up` jobs, so the loop stops once the agent has escalated.
+          needs_tl="$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq 'any(.[]; .name == "needs-tl")' 2> /dev/null || echo false)"
+          echo "PR has needs-tl: $needs_tl"
+          echo "needs_tl=$needs_tl" >> "$GITHUB_OUTPUT"
+
   # Agent PRs only: when changes are requested and the round limit isn't reached, let the agent fix them.
+  # Not when the PR already has `needs-tl` (the agent escalated or gave up): it's waiting for the TL.
   # The fixer pushes as claude[bot], which starts a new review run (queued behind this one).
   fix:
     needs: review
     if: >-
       needs.review.outputs.verdict == 'changes_requested' &&
+      needs.review.outputs.needs_tl != 'true' &&
       startsWith(github.head_ref, 'agent/') &&
       fromJSON(needs.review.outputs.round) < fromJSON(vars.AGENT_MAX_ROUNDS || '3')
     uses: ./.github/workflows/agent-fix.yml
@@ -308,10 +319,12 @@ jobs:
       actions: read
 
   # Agent PRs only: too many rounds without approval. Stop the loop and hand the PR to the TL.
+  # Skipped when the PR already has `needs-tl`: it was handed over already.
   give-up:
     needs: review
     if: >-
       needs.review.outputs.verdict == 'changes_requested' &&
+      needs.review.outputs.needs_tl != 'true' &&
       startsWith(github.head_ref, 'agent/') &&
       fromJSON(needs.review.outputs.round) >= fromJSON(vars.AGENT_MAX_ROUNDS || '3')
     runs-on: ubuntu-latest

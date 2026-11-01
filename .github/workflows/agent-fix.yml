@@ -134,6 +134,7 @@ jobs:
               2. **Why it's a problem,** and what would break (a concrete example where possible).
               3. **Options,** for example (a) fix the foundation first in a separate issue, (b) accept the risk, (c) change this issue.
               4. **A drafted follow-up issue:** a title plus a Scope (In scope / Out of scope) the tech lead can copy. Never create issues yourself.
+              If the blocking issue has no comment thread (it's only in the summary list), don't reply anywhere: just return the body in `escalation`. The workflow posts it in a PR comment.
               Never escalate over style, naming or personal preference.
 
             ## Order and pushing (exactly one push)
