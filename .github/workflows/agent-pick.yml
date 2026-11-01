@@ -33,6 +33,9 @@ jobs:
     outputs:
       issue_number: ${{ steps.pick.outputs.issue_number }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4 # only for the local board action below
+
       - name: Pick an issue
         id: pick
         env:
@@ -113,6 +116,17 @@ jobs:
           gh api --method POST "repos/$REPO/issues/$issue_number/labels" -f "labels[]=agent:in-progress" > /dev/null
           echo "Picked issue #$issue_number."
           echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+
+      - name: "Board: In Progress"
+        if: steps.pick.outputs.issue_number != ''
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ steps.pick.outputs.issue_number }}
+          status: In Progress
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
 
   implement:
     needs: select

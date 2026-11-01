@@ -302,6 +302,7 @@ jobs:
       fromJSON(needs.review.outputs.round) >= fromJSON(vars.AGENT_MAX_ROUNDS || '3')
     runs-on: ubuntu-latest
     permissions:
+      contents: read # to check out the repo for the board action
       issues: write
       pull-requests: write
     env:
@@ -309,13 +310,38 @@ jobs:
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       ROUND: ${{ needs.review.outputs.round }}
+      HEAD_REF: ${{ github.head_ref }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Hand over to TL
+        id: handover
         run: |
           set -euo pipefail
+
+          # Linked issue (for the board): the PR's "Closes #n", or else the n in agent/issue-<n>.
+          issue="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')"
+          if [ -z "$issue" ] && [[ "$HEAD_REF" =~ ^agent/issue-([0-9]+)$ ]]; then
+            issue="${BASH_REMATCH[1]}"
+          fi
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+
           gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
           comment_file="$RUNNER_TEMP/give-up-comment.md"
           printf '🤖 %s review rounds without approval. The agent has stopped; tech lead, please take over.\n\n<sub>[Run log](%s)</sub>\n' \
             "$ROUND" "$RUN_URL" > "$comment_file"
           gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+      - name: Checkout
+        if: steps.handover.outputs.issue != ''
+        uses: actions/checkout@v4
+
+      - name: "Board: Blocked"
+        if: steps.handover.outputs.issue != ''
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ steps.handover.outputs.issue }}
+          status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}

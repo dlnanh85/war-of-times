@@ -141,6 +141,7 @@ jobs:
             - Don't post a summary comment on the PR; only reply in review threads.
 
       - name: Check that something was pushed
+        id: pushed
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,12 +152,25 @@ jobs:
           new_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')"
           if [ "$new_sha" != "$OLD_SHA" ]; then
             echo "Pushed: $BRANCH is now at $new_sha (was $OLD_SHA). The reviewer will run again."
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "::warning::Nothing was pushed to $BRANCH. Handing the PR to the TL."
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
           gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
           comment_file="$RUNNER_TEMP/fix-handover-comment.md"
           printf '🤖 The agent could not address the review on this PR (nothing was pushed). The tech lead needs to take over.\n\nSee the [run log](%s) for what happened.\n' \
             "$RUN_URL" > "$comment_file"
           gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+      - name: "Board: Blocked"
+        if: ${{ !cancelled() && steps.pushed.outputs.pushed == 'false' && steps.pr.outputs.issue != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ steps.pr.outputs.issue }}
+          status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
