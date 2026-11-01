@@ -2,14 +2,24 @@
   "name": "@wot/client",
   "version": "1.0.0",
   "private": true,
-  "main": "src/index.ts",
+  "main": "src/main.tsx",
   "scripts": {
-    "build": "echo no build yet",
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
     "test": "echo no tests yet",
     "lint": "echo no lint yet",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@wot/shared": "1.0.0"
+    "@wot/shared": "1.0.0",
+    "phaser": "^4.2.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "vite": "^8.3.5"
   }
 }
