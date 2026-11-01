@@ -84,7 +84,7 @@ jobs:
           # 4. Candidates: agent-ready issues that are not already taken or blocked.
           candidates="$(gh issue list --repo "$REPO" --state open --label "agent-ready" --limit 200 \
             --json number,createdAt,milestone,labels \
-            --jq '[.[] | select([.labels[].name] | any(. == "agent:in-progress" or . == "agent:needs-info" or . == "needs-tl") | not)
+            --jq '[.[] | select([.labels[].name] | any(. == "agent:in-progress" or . == "needs-tl") | not)
                        | {number, createdAt, dueOn: (.milestone.dueOn // null)}]')"
           if [ "$(jq 'length' <<< "$candidates")" -eq 0 ]; then
             echo "No agent-ready issues to pick."

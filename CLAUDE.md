@@ -38,6 +38,9 @@ These apply to the AI agent when it implements an issue.
 - **Never merge** a PR. Only the TL merges.
 - **Never write the text `@claude`** in commits, comments, PRs or issues. It triggers another workflow.
 - If you can't finish, don't open a PR. Comment on the issue explaining what blocked you.
+- **Stop and ask when the foundation is wrong.** Before building, read the code the issue builds on. If doing the issue as written means building on code or a decision you believe is wrong, and fixing it is outside the issue's Scope, stop: open no PR and escalate with evidence (file + lines), why it's a problem, options, and a drafted follow-up issue. Never fix the foundation yourself outside the Scope.
+- **Smaller worries are Concerns, not stops.** If you can still do the issue correctly, do it and list the worries under "## Concerns" in the PR body.
+- Never escalate over style, naming or personal preference. When unsure, choose Concern.
 
 ## Review rules
 

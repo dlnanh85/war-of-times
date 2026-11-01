@@ -1,7 +1,8 @@
 # Agent fixer.
 #
 # Called by the reviewer (claude-code-review.yml, job `fix`) when an agent PR gets "changes requested".
-# For each blocking review comment, Claude either fixes it or pushes back with a reply that cites evidence.
+# For each blocking review comment, Claude either fixes it, pushes back with a reply that cites evidence,
+# or (only when the fix lies outside the issue's Scope) escalates to the TL.
 # It then pushes ONCE, as claude[bot]. That push triggers a new review run, which sees the fixes and the
 # replies. That's the review ↔ fix loop. If nothing gets pushed, the PR is handed to the TL with `needs-tl`.
 #
@@ -107,6 +108,7 @@ jobs:
             --model ${{ steps.model.outputs.model || 'sonnet' }}
             --max-turns 40
             --allowedTools "Read,Write,Edit,Glob,Grep,Bash(yarn:*),Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*)"
+            --json-schema '{"type":"object","required":["outcome"],"properties":{"outcome":{"enum":["pushed","escalated"]},"escalation":{"type":"string"}}}'
           prompt: |
             You are an AI agent fixing review feedback on PR #${{ inputs.pr_number }} in ${{ github.repository }}.
             This is review round ${{ inputs.round }}. You are on the PR's branch `${{ steps.pr.outputs.branch }}`.
@@ -125,24 +127,84 @@ jobs:
               explaining why it shouldn't change. The reason MUST cite something concrete: the issue's acceptance criteria, a CLAUDE.md rule, a test result, or documentation. "I disagree" alone is not allowed.
               If the reviewer already answered your earlier push-back on that comment and held its position with a new argument, don't push back again: fix it.
               Blocking issues that have no inline comment (only in the summary list) can't get a thread reply; fix those.
+            - Escalate. ONLY when the only correct fix is to change code or a decision outside the issue's Scope.
+              Don't change anything for that issue. Reply in its comment thread (same command as push-back) with the escalation body,
+              which must have all four parts:
+              1. **Evidence:** file + lines, or the decision/issue it's about.
+              2. **Why it's a problem,** and what would break (a concrete example where possible).
+              3. **Options,** for example (a) fix the foundation first in a separate issue, (b) accept the risk, (c) change this issue.
+              4. **A drafted follow-up issue:** a title plus a Scope (In scope / Out of scope) the tech lead can copy. Never create issues yourself.
+              Never escalate over style, naming or personal preference.
 
             ## Order and pushing (exactly one push)
-            1. Post all push-back replies first, so they exist before the next review starts.
+            1. Post all push-back and escalation replies first, so they exist before the next review starts.
             2. Make the fixes as normal, meaningful commits. The message names what was fixed (for example "Fix off-by-one in gold income").
             3. If `package.json` exists, run `yarn lint`, `yarn typecheck` and `yarn test` (the ones that exist) and fix failures.
             4. Push once, at the end: `git push origin ${{ steps.pr.outputs.branch }}`. That push starts the next review.
             5. Only if there was nothing to fix (every blocking issue got a push-back reply): make an empty commit instead,
                `git commit --allow-empty -m "Reply to review comments"`, and push that.
                Never add an empty commit when there are real fix commits. Never push more than once. Never force-push.
+            6. If you escalated an issue: still push the fixes for the other issues (steps 2–4). If there is nothing else to push, don't push at all.
+
+            ## Your final output
+            - `outcome`: "escalated" if you escalated any blocking issue, otherwise "pushed".
+            - `escalation`: when escalated, the same escalation body you posted (all four parts).
 
             ## Hard rules
             - Never write the text "@claude" anywhere (code, commits, replies).
             - Never merge the PR, and never push to `main`.
             - Don't post a summary comment on the PR; only reply in review threads.
 
+      - name: Read fix result
+        id: fix_result
+        if: ${{ !cancelled() }}
+        env:
+          FIX_JSON: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          # Never fails: a missing or invalid result just means outcome is empty.
+          outcome="$(printf '%s' "$FIX_JSON" | jq -r '.outcome // empty' 2> /dev/null || true)"
+          echo "Fix outcome: ${outcome:-unknown}"
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+
+      # A review comment can only be fixed outside this issue's Scope: ask the TL to decide.
+      # Fixes for the other comments (if any) were still pushed, so the review runs again;
+      # the picker sees `needs-tl` and doesn't treat the PR as busy.
+      - name: Escalate
+        id: escalate
+        if: ${{ !cancelled() && steps.fix_result.outputs.outcome == 'escalated' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIX_JSON: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          escalation="$(printf '%s' "$FIX_JSON" | jq -r '.escalation // empty' 2> /dev/null || true)"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=needs-tl" > /dev/null
+          comment_file="$RUNNER_TEMP/fix-escalation-comment.md"
+          {
+            printf '🤖 The agent stopped: a review comment can only be fixed by changing code or a decision outside this issue'\''s Scope. See the thread for details and options.\n\n'
+            if [ -n "$escalation" ]; then
+              printf '<details><summary>Escalation</summary>\n\n%s\n\n</details>\n\n' "$escalation"
+            fi
+            printf '<sub>[Run log](%s)</sub>\n' "$RUN_URL"
+          } > "$comment_file"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$comment_file" > /dev/null
+
+      - name: "Board: Blocked (needs decision)"
+        if: ${{ !cancelled() && steps.escalate.outcome == 'success' && steps.pr.outputs.issue != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/set-project-status
+        with:
+          issue-number: ${{ steps.pr.outputs.issue }}
+          status: Blocked
+          token: ${{ secrets.PROJECT_TOKEN }}
+          project-owner: ${{ vars.PROJECT_OWNER }}
+          project-number: ${{ vars.PROJECT_NUMBER }}
+
+      # Skipped after an escalation: that case is already handed to the TL above.
       - name: Check that something was pushed
         id: pushed
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.escalate.outcome != 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.pr.outputs.branch }}
