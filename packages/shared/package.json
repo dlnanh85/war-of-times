@@ -1,0 +1,12 @@
+{
+  "name": "@wot/shared",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "echo no build yet",
+    "test": "echo no tests yet",
+    "lint": "echo no lint yet",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}
