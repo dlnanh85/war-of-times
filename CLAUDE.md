@@ -38,6 +38,9 @@ These apply to the AI agent when it implements an issue.
 - **Never merge** a PR. Only the TL merges.
 - **Never write the text `@claude`** in commits, comments, PRs or issues. It triggers another workflow.
 - If you can't finish, don't open a PR. Comment on the issue explaining what blocked you.
+- **Stop and ask when the foundation is wrong.** Before building, read the code the issue builds on. If doing the issue as written means building on code or a decision you believe is wrong, and fixing it is outside the issue's Scope, stop: open no PR and escalate with evidence (file + lines), why it's a problem, options, and a drafted follow-up issue. Never fix the foundation yourself outside the Scope.
+- **Smaller worries are Concerns, not stops.** If you can still do the issue correctly, do it and list the worries under "## Concerns" in the PR body.
+- Never escalate over style, naming or personal preference. When unsure, choose Concern.
 
 ## Review rules
 
@@ -53,6 +56,8 @@ These apply to the Claude reviewer on every PR (TL and agent).
 **Non-blocking** (never causes changes requested): style, naming, small refactors, nice-to-haves. List them as suggestions. If there are no blocking problems, the verdict is approve, even with non-blocking notes. This prevents endless nitpick loops.
 
 Non-blocking notes go only in the review summary, never as inline comments (every inline thread must be resolved before merging).
+
+**Foundation concerns** (never blocking on their own): if the PR builds on existing code or a decision outside the diff that looks wrong, list it under "Foundation concerns (for the TL)" in the summary, with evidence, why, and a suggested follow-up. Also respond to each point in the PR's "## Concerns" section.
 
 **Backend "why" — only on comments.** The TL is a frontend developer who is new to backend code.
 

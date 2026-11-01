@@ -42,6 +42,7 @@ jobs:
     outputs:
       verdict: ${{ steps.verdict.outputs.verdict }}
       round: ${{ steps.verdict.outputs.round }}
+      needs_tl: ${{ steps.verdict.outputs.needs_tl }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -77,7 +78,7 @@ jobs:
             --model opus
             --max-turns 30
             --allowedTools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*),mcp__github_inline_comment__create_inline_comment"
-            --json-schema '{"type":"object","required":["verdict","summary","blocking","non_blocking"],"properties":{"verdict":{"enum":["approve","changes_requested"]},"summary":{"type":"string"},"blocking":{"type":"array","items":{"type":"string"}},"non_blocking":{"type":"array","items":{"type":"string"}},"previous_comments_addressed":{"type":"boolean"},"thread_decisions":{"type":"array","items":{"type":"object","required":["comment_id","decision"],"properties":{"comment_id":{"type":"integer"},"decision":{"enum":["accept","hold","fixed"]}}}}}}'
+            --json-schema '{"type":"object","required":["verdict","summary","blocking","non_blocking"],"properties":{"verdict":{"enum":["approve","changes_requested"]},"summary":{"type":"string"},"blocking":{"type":"array","items":{"type":"string"}},"non_blocking":{"type":"array","items":{"type":"string"}},"foundation_concerns":{"type":"array","items":{"type":"string"}},"previous_comments_addressed":{"type":"boolean"},"thread_decisions":{"type":"array","items":{"type":"object","required":["comment_id","decision"],"properties":{"comment_id":{"type":"integer"},"decision":{"enum":["accept","hold","fixed"]}}}}}}'
           prompt: |
             You are the code reviewer for the GitHub repository ${{ github.repository }}.
 
@@ -109,6 +110,10 @@ jobs:
             - Only problems from the four points above are blocking. Use `changes_requested` only if there is at least one blocking problem.
             - Style, naming, small refactors and nice-to-haves are non-blocking. Put them in `non_blocking`. They must NOT cause `changes_requested`. This prevents endless nitpick loops.
             - If there are no blocking problems, the verdict is `approve`, even if you have non-blocking notes.
+
+            ## Foundation concerns (for the tech lead)
+            - If the PR builds on existing code or a decision outside the diff that you believe is wrong, list it in `foundation_concerns`: the evidence (file + lines, or the decision), why it's a problem, and a suggested follow-up. This is NOT blocking on its own.
+            - If the PR body has a `## Concerns` section (the agent lists its worries there), respond to each one, in `foundation_concerns` or `non_blocking`: agree or disagree, and why.
 
             ## Re-reviews
             If you reviewed this PR before:
@@ -145,6 +150,7 @@ jobs:
             - `summary`: 1–3 plain-English sentences on the overall state of the PR. The first 140 characters are shown as the commit status, so put the most important point first.
             - `blocking`: one short string per blocking problem (file and line if relevant). Empty if none.
             - `non_blocking`: one short string per non-blocking note. Empty if none.
+            - `foundation_concerns`: one string per concern about existing code or decisions the PR builds on (see above). Empty if none.
             - `previous_comments_addressed`: only on a re-review.
             - `thread_decisions`: "fixed" for your earlier comments that are now fixed in the code, and "accept" / "hold" for threads where the author pushed back.
 
@@ -208,6 +214,9 @@ jobs:
             "",
             "### Non-blocking (suggestions only, these do not block merging)",
             (.non_blocking | bullets),
+            (if ((.foundation_concerns // []) | length) > 0
+              then "", "### Foundation concerns (for the TL)", (.foundation_concerns | bullets)
+              else empty end),
             (if has("previous_comments_addressed")
               then "", "Earlier review comments addressed: \(if .previous_comments_addressed then "yes" else "no" end)"
               else empty end),
@@ -279,12 +288,22 @@ jobs:
             set_status failure "$description"
           fi
 
+          # 7. Is the PR waiting for the TL (`needs-tl`)? Read the labels NOW, not from the event:
+          #    the fixer adds `needs-tl` after its push, so the push event doesn't include it yet. This run
+          #    starts only after the fixer's run has finished (concurrency queue), so the label is there by now.
+          #    Used by the `fix` and `give-up` jobs, so the loop stops once the agent has escalated.
+          needs_tl="$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq 'any(.[]; .name == "needs-tl")' 2> /dev/null || echo false)"
+          echo "PR has needs-tl: $needs_tl"
+          echo "needs_tl=$needs_tl" >> "$GITHUB_OUTPUT"
+
   # Agent PRs only: when changes are requested and the round limit isn't reached, let the agent fix them.
+  # Not when the PR already has `needs-tl` (the agent escalated or gave up): it's waiting for the TL.
   # The fixer pushes as claude[bot], which starts a new review run (queued behind this one).
   fix:
     needs: review
     if: >-
       needs.review.outputs.verdict == 'changes_requested' &&
+      needs.review.outputs.needs_tl != 'true' &&
       startsWith(github.head_ref, 'agent/') &&
       fromJSON(needs.review.outputs.round) < fromJSON(vars.AGENT_MAX_ROUNDS || '3')
     uses: ./.github/workflows/agent-fix.yml
@@ -300,10 +319,12 @@ jobs:
       actions: read
 
   # Agent PRs only: too many rounds without approval. Stop the loop and hand the PR to the TL.
+  # Skipped when the PR already has `needs-tl`: it was handed over already.
   give-up:
     needs: review
     if: >-
       needs.review.outputs.verdict == 'changes_requested' &&
+      needs.review.outputs.needs_tl != 'true' &&
       startsWith(github.head_ref, 'agent/') &&
       fromJSON(needs.review.outputs.round) >= fromJSON(vars.AGENT_MAX_ROUNDS || '3')
     runs-on: ubuntu-latest
