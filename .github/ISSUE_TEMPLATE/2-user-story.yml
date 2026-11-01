@@ -26,6 +26,17 @@ body:
     validations:
       required: true
   - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this issue covers, at a high level. Describe the work, not a list of files.
+      value: |
+        **In scope**
+        -
+
+        **Out of scope**
+        -
+  - type: textarea
     id: notes
     attributes:
       label: Notes / design references

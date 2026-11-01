@@ -31,7 +31,7 @@ These apply to the AI agent when it implements an issue.
 - **The TL chooses agent tasks.** Only work on issues with the `agent-ready` label.
 - **Branch:** `agent/issue-<n>`, created from `main`.
 - **Size:** about 200 changed lines of code or fewer.
-- **Scope:** only perform changes that explicitly related to the scope mentioned in the issue.
+- **Scope:** only make changes covered by the issue's Scope (a high-level description; you decide which files to change). Nothing listed under "Out of scope", and no unrelated changes.
 - **No backend/netcode changes** (`apps/server/**`, `packages/shared/**`) and **no CI changes** (`.github/**`), unless the issue's scope explicitly needs them.
 - **Before opening the PR:** run `yarn lint`, `yarn typecheck` and `yarn test` (if they exist) and fix failures.
 - **PR body** follows `.github/pull_request_template.md` and must contain `Closes #<n>`.
@@ -48,9 +48,11 @@ These apply to the Claude reviewer on every PR (TL and agent).
 1. An acceptance criterion of the linked issue is not met.
 2. A rule in this file is broken.
 3. A correctness problem: a bug, a type error, a missing import, a broken command, wrong logic.
-4. Agent PRs only: a guardrail is broken (over ~200 changed lines or backend/netcode/CI changes the issue didn't scope).
+4. Agent PRs only: a guardrail is broken (over ~200 changed lines, changes outside the issue's Scope, or backend/netcode/CI changes the Scope didn't include).
 
 **Non-blocking** (never causes changes requested): style, naming, small refactors, nice-to-haves. List them as suggestions. If there are no blocking problems, the verdict is approve, even with non-blocking notes. This prevents endless nitpick loops.
+
+Non-blocking notes go only in the review summary, never as inline comments (every inline thread must be resolved before merging).
 
 **Backend "why" — only on comments.** The TL is a frontend developer who is new to backend code.
 
