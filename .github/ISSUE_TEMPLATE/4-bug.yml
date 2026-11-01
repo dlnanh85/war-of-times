@@ -35,5 +35,3 @@ body:
 
         **Out of scope**
         -
-    validations:
-      required: true

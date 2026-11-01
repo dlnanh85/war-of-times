@@ -36,8 +36,6 @@ body:
 
         **Out of scope**
         -
-    validations:
-      required: true
   - type: textarea
     id: notes
     attributes:
