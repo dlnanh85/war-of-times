@@ -1,14 +1,20 @@
-## Summary
+## What
 
-<!-- What does this PR change, and why? -->
+<!-- What does this PR change? -->
 
-Closes #
+## Why
+
+<!-- Why is this change needed? -->
 
 ## How to test
 
 <!-- Steps a reviewer can follow to check the change. -->
 
 1.
+
+## Linked issue
+
+Closes #
 
 ## Checklist
 
