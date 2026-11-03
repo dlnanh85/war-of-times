@@ -2,7 +2,7 @@
 
 A 2-player online browser game in the style of Age of War: one lane, two bases. Buy units and destroy the enemy base.
 
-Built with TypeScript: Phaser 3 + React on the client, Colyseus on Node.js on the server.
+Built with TypeScript: Phaser 4 + React on the client, Colyseus on Node.js on the server.
 
 ## Folder map
 
