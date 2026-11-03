@@ -107,7 +107,7 @@ jobs:
           claude_args: |
             --model ${{ steps.model.outputs.model || 'sonnet' }}
             --max-turns 40
-            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(yarn:*),Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*)"
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(yarn:*),Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr edit:*),Bash(gh issue view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/pulls/*/comments/*/replies:*)"
             --json-schema '{"type":"object","required":["outcome"],"properties":{"outcome":{"enum":["pushed","escalated"]},"escalation":{"type":"string"}}}'
           prompt: |
             You are an AI agent fixing review feedback on PR #${{ inputs.pr_number }} in ${{ github.repository }}.
@@ -127,6 +127,8 @@ jobs:
               explaining why it shouldn't change. The reason MUST cite something concrete: the issue's acceptance criteria, a CLAUDE.md rule, a test result, or documentation. "I disagree" alone is not allowed.
               If the reviewer already answered your earlier push-back on that comment and held its position with a new argument, don't push back again: fix it.
               Blocking issues that have no inline comment (only in the summary list) can't get a thread reply; fix those.
+              A blocking PR title: fix it with `gh pr edit ${{ inputs.pr_number }} --title "<type>(<scope>): <subject>"` (CLAUDE.md → Conventions → Git).
+              A blocking commit message can't be fixed without a force-push: escalate it instead (the tech lead fixes it in the squash message).
             - Escalate. ONLY when the only correct fix is to change code or a decision outside the issue's Scope.
               Don't change anything for that issue. Reply in its comment thread (same command as push-back) with the escalation body,
               which must have all four parts:
@@ -135,15 +137,16 @@ jobs:
               3. **Options,** for example (a) fix the foundation first in a separate issue, (b) accept the risk, (c) change this issue.
               4. **A drafted follow-up issue:** a title plus a Scope (In scope / Out of scope) the tech lead can copy. Never create issues yourself.
               If the blocking issue has no comment thread (it's only in the summary list), don't reply anywhere: just return the body in `escalation`. The workflow posts it in a PR comment.
-              Never escalate over style, naming or personal preference.
+              Never escalate over style, naming or personal preference. Conventions violations are fixed, not escalated (except commit messages, see above).
 
             ## Order and pushing (exactly one push)
             1. Post all push-back and escalation replies first, so they exist before the next review starts.
-            2. Make the fixes as normal, meaningful commits. The message names what was fixed (for example "Fix off-by-one in gold income").
-            3. If `package.json` exists, run `yarn lint`, `yarn typecheck` and `yarn test` (the ones that exist) and fix failures.
+            2. Make the fixes as normal, meaningful commits. The message names what was fixed and follows CLAUDE.md → Conventions → Git (for example `fix(shared): fix off-by-one in gold income`).
+            3. Run `yarn format`, `yarn lint`, `yarn typecheck` and `yarn test` — only the scripts that exist in the root `package.json` — and fix failures.
+               Never add a missing script yourself.
             4. Push once, at the end: `git push origin ${{ steps.pr.outputs.branch }}`. That push starts the next review.
-            5. Only if there was nothing to fix (every blocking issue got a push-back reply): make an empty commit instead,
-               `git commit --allow-empty -m "Reply to review comments"`, and push that.
+            5. Only if there was nothing to fix in the code (every blocking issue got a push-back reply, or the only fix was a PR title change): make an empty commit instead,
+               `git commit --allow-empty -m "chore(agent): reply to review comments"`, and push that. The push is what starts the next review.
                Never add an empty commit when there are real fix commits. Never push more than once. Never force-push.
             6. If you escalated an issue: still push the fixes for the other issues (steps 2–4). If there is nothing else to push, don't push at all.
 

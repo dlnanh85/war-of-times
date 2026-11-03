@@ -228,15 +228,17 @@ jobs:
             You are an AI agent implementing issue #${{ inputs.issue_number }} in ${{ github.repository }}.
 
             ## Steps
-            1. Read the issue: `gh issue view ${{ inputs.issue_number }}`. Read `CLAUDE.md` and follow its "Agent rules".
+            1. Read the issue: `gh issue view ${{ inputs.issue_number }}`. Read `CLAUDE.md` and follow its "Agent rules" and "Conventions".
             2. Read the existing code the issue builds on BEFORE writing any new code (see "Stop or Concern" below).
             3. Create the branch `agent/issue-${{ inputs.issue_number }}` from `main` (you are on `main` now).
                If that branch already exists on `origin` from an earlier attempt, start fresh from `main` anyway and overwrite it with `git push --force-with-lease`.
             4. Implement the issue. Stay inside its scope; make no unrelated changes.
-            5. Commit in small steps with clear messages that say what changed.
-            6. If `package.json` exists, run `yarn lint`, `yarn typecheck` and `yarn test` (the ones that exist) and fix any failures.
+            5. Commit in small steps. Every commit message follows CLAUDE.md → Conventions → Git: `<type>(<scope>): <subject>`.
+            6. Run `yarn format`, `yarn lint`, `yarn typecheck` and `yarn test` — only the scripts that exist in the root `package.json` — and fix any failures.
+               Never add a missing script yourself unless the issue's Scope asks for it.
             7. Push the branch: `git push -u origin agent/issue-${{ inputs.issue_number }}`.
-            8. Open a PR with `gh pr create --base main --head agent/issue-${{ inputs.issue_number }}`.
+            8. Open a PR with `gh pr create --base main --head agent/issue-${{ inputs.issue_number }} --title "<type>(<scope>): <subject>"`.
+               The title follows CLAUDE.md → Conventions → Git: 72 characters or fewer, no issue number.
                Fill the body using `.github/pull_request_template.md`, with `Closes #${{ inputs.issue_number }}` on its own line.
                If an open PR for this branch already exists from an earlier attempt, don't create another one; the push updates it.
 
@@ -250,6 +252,7 @@ jobs:
               4. **A drafted follow-up issue:** a title plus a Scope (In scope / Out of scope) the tech lead can copy. Never create issues yourself.
             - **Concern:** something looks off, but you can still do the issue correctly as written.
               Then implement it, add a `## Concerns` section to the PR body listing each worry, and list them in `concerns`.
+            - If the issue's wording conflicts with CLAUDE.md "Conventions" (for example it suggests a camelCase file name), follow Conventions and mention it under `## Concerns`. Never escalate over it.
             - Never stop over style, naming or "I'd have done it differently". When unsure between Concern and Stop, choose Concern.
 
             ## If you can't finish (for any other reason)
