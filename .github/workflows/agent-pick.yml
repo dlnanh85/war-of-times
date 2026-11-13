@@ -13,8 +13,6 @@
 name: Agent Pick
 
 on:
-  schedule:
-    - cron: '0 19 * * *' # 02:00 Asia/Saigon (UTC+7)
   workflow_dispatch:
 
 concurrency:
